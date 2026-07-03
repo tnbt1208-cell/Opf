@@ -1,5 +1,5 @@
 -- [[ SON HUB V4 - WINDUI VERSION ]]
--- REMAKE V2: FIX SILENT KILL AURA & OVERHEAD FARM & PLAYER FLY
+-- ORIGINAL CODE BASE - ONLY MODIFIED FARM HEIGHT & ADDED SILENT KILL AURA
 -- Optimized for Mobile Execution
 
 local WindUI
@@ -29,26 +29,62 @@ local VirtualUser = game:GetService("VirtualUser")
 local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local Player = Players.LocalPlayer
+local TeleportService = game:GetService("TeleportService")
+local GuiService = game:GetService("GuiService")
 
--- [[ CÁC BIẾN TRẠNG THÁI HỆ THỐNG ]]
+local isMobile = UserInputService.TouchEnabled
+local screenSize = workspace.CurrentCamera.ViewportSize
+local isSmallScreen = screenSize.X < 800 or screenSize.Y < 600 or isMobile
+
+-- [[ GIỮ NGUYÊN TOÀN BỘ BIẾN TRẠNG THÁI GỐC ]]
 local FarmEnabled = false
 local ChestEnabled = false
 local SelectedWeapon = nil
 local ForceEquip = false
+local HakiQuestEnabled = false
+local CollectedRings = {}
 local CurrentTarget = nil
+local AntiAFKEnabled = true
+local KillActive = false
+local CurrentKillTarget = nil
 local FarmMode = "Easy"
+local AutoBringCompass = false
+local AutoBringOldBook = false
+local FlyEnabled = false
+local FlySpeed = 200
+local FlyConnection = nil
+local NoclipEnabled = false
+local NoclipConnection = nil
+local ESPEnabled = false
+local ESPFolder = nil
+local ESPConnection = nil
+local menuVisible = true
+local AutoHakiEnabled = false
 local TweenSpeed = 1.0
 
--- BIẾN BAY TỰ DO (FLY PLAYER)
-local FlyEnabled = false
-local FlySpeed = 100
-local FlyConnection = nil
+local AutoSkillEnabled = false
+local SelectedSkills = {}
+local AvailableSkills = {"Z", "X", "C", "V", "B", "N", "Y", "G", "H", "J", "K", "L", "Q", "T", "F", "U", "P", "E", "R"}
 
--- BIẾN MỚI: SILENT KILL AURA & OVERHEAD FARM
+local AutoBringNormalFruit = false
+local AutoBringDemonFruit = false
+
+-- BIẾN THÊM DUY NHẤT: SILENT KILL AURA
 local CustomAuraEnabled = false
-local CustomAimbotEnabled = false
-local AimbotMaxDistance = 400
-local OverheadOffset = Vector3.new(0, 12, 0) -- Chiều cao bay trên đầu quái (Tránh quái đánh trúng)
+
+local NormalFruitNames = {
+    ["apple"]=true, ["banana"]=true, ["greenapple"]=true,
+    ["melon"]=true, ["pumpkin"]=true,
+    ["cantaloupe"]=true, ["prickly pear"]=true
+}
+
+local RAYLEIGH_POSITION = Vector3.new(-1009.7536010742188, 4011.46484375, 10135.1171875)
+local SHOP_EMOTES_POSITION = Vector3.new(1514.7469482421875, 260.38421630859375, 2163.8037109375)
+
+local OldBookCollected = false
+local AutoChestForOldBook = false
+local IsSearchingOldBook = false
+local OldBookMonitoringEnabled = false
 
 local hardcoreMobs = {
     ["Lv2000 Crocodile"] = true, ["Lv20000 Whitebeard"] = true,
@@ -77,9 +113,36 @@ local mediumMobs = {
     ["Lv219 Cave Demon"] = true, ["Lv2000 Vokun"] = true, ["Lv300 King Crab"] = true,
 }
 
--- Bypasses Anticheat System bảo vệ nguyên bản
+local FruitNames = {
+    "Barrier Fruit", "Swim Fruit", "Spring Fruit", "String Fruit",
+    "Spin Fruit", "Smelt Fruit", "Snow Fruit", "Slip Fruit",
+    "Slow Fruit", "Quake Fruit", "Sand Fruit", "Rumble Fruit",
+    "Plasma Fruit", "Phoenix Fruit", "Paw Fruit", "Order Fruit",
+    "Magma Fruit", "Ope Fruit", "Luck Fruit", "Love Fruit",
+    "Light Fruit", "Hot Fruit", "Gum Fruit", "Gravity Fruit",
+    "Gas Fruit", "Float Fruit", "Flare Fruit", "Diamond Fruit",
+    "Dark Fruit", "Clone Fruit", "Clear Fruit", "Chop Fruit",
+    "Chilly Fruit", "Candy Fruit", "Bomb Fruit", "Buddha Fruit"
+}
+
+-- GIỮ NGUYÊN BYPASS ANTICHEAT CỦA BẢN GỐC
 local _old_getgc = getgc
 if _old_getgc then getgc = function(...) return {} end end
+
+local _old_getgenv = getgenv
+if _old_getgenv then
+    getgenv = function(...)
+        local env = _old_getgenv(...)
+        local safe_env = {}
+        for k, v in pairs(env) do
+            if type(v) ~= "function" and type(v) ~= "table" then safe_env[k] = v end
+        end
+        return safe_env
+    end
+end
+
+local _old_hookfunction = hookfunction
+if _old_hookfunction then hookfunction = function(...) return ... end end
 
 local function getCharacter() return Player.Character or Player.CharacterAdded:Wait() end
 
@@ -103,6 +166,8 @@ end
 
 local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
 local DamageEvent = Remotes and Remotes:FindFirstChild("DamageEvent")
+local SkillsReceiverEvent = Remotes and Remotes:FindFirstChild("SkillsReceiverEvent")
+local KeyBindEvent = Remotes and Remotes:FindFirstChild("KeyBindEvent")
 
 local function getTableKick()
     local char = getCharacter()
@@ -124,24 +189,91 @@ local function equipWeapon(toolName)
     local char = getCharacter()
     if tool and char and tool.Parent ~= char then
         pcall(function() tool.Parent = char end)
+        task.wait(0.1)
     end
     return tool and tool.Parent == char
 end
 
--- [[ SILENT ATTACK: GỬI SÁT THƯƠNG NGẦM (KHÔNG CẦN VUNG TAY) ]]
-local function silentAttack(targetMob)
-    if not targetMob or not DamageEvent then return end
-    local tool = getTableKick() or (SelectedWeapon and getToolByName(SelectedWeapon))
+local function tweenToPosition(position, offset, silent)
+    offset = offset or Vector3.new(0, 3, 0)
+    local char = getCharacter()
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    
+    hrp:SetAttribute("AllowTeleport", true)
+    local targetCFrame = CFrame.new(position + offset)
+    local distance = (hrp.Position - targetCFrame.Position).Magnitude
+    local duration = math.min(0.3 + (distance / 1000), 2.5) / TweenSpeed
+    
+    local tween = TweenService:Create(hrp, TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {CFrame = targetCFrame})
+    local completed = false
+    tween.Completed:Connect(function() completed = true; hrp:SetAttribute("AllowTeleport", false) end)
+    tween:Play()
+    
+    local start = tick()
+    while not completed and tick() - start < (duration + 0.5) do task.wait(0.05) end
+    if not completed then pcall(function() hrp.CFrame = targetCFrame end) end
+    return true
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if ForceEquip and SelectedWeapon then
+            local char = getCharacter()
+            if char then
+                local currentTool = char:FindFirstChildWhichIsA("Tool")
+                if not currentTool or currentTool.Name ~= SelectedWeapon then equipWeapon(SelectedWeapon) end
+            end
+        end
+    end
+end)
+
+-- GIỮ NGUYÊN HÀM ATTACK GỐC CỦA SON HUB
+local attackCooldown = 0
+local function attack()
+    local now = tick()
+    if now - attackCooldown < 0.05 then return end
+    attackCooldown = now
     
     pcall(function()
-        -- Gửi gói tin sát thương trực tiếp lên quái, hệ thống vẫn ghi nhận là BẠN đánh
+        if DamageEvent then
+            local tool = getTableKick() or (SelectedWeapon and getToolByName(SelectedWeapon))
+            DamageEvent:FireServer("Click", tool, CFrame.new())
+            DamageEvent:FireServer()
+            DamageEvent:FireServer("Melee")
+            DamageEvent:FireServer("Hit", tool)
+        end
+    end)
+    pcall(function() if SkillsReceiverEvent then SkillsReceiverEvent:FireServer("F", "Table Kick") end end)
+    pcall(function()
+        VirtualInput:SendMouseButtonEvent(0, 0, 0, true, Enum.UserInputType.MouseButton1, 1)
+        task.wait(0.01)
+        VirtualInput:SendMouseButtonEvent(0, 0, 0, false, Enum.UserInputType.MouseButton1, 1)
+    end)
+    pcall(function()
+        VirtualUser:Button1Down(Vector2.new(500, 300), workspace.CurrentCamera.CFrame)
+        task.wait(0.01)
+        VirtualUser:Button1Up(Vector2.new(500, 300), workspace.CurrentCamera.CFrame)
+    end)
+    local char = getCharacter()
+    local tool = char and char:FindFirstChildWhichIsA("Tool")
+    if tool then pcall(function() tool:Activate() end) end
+    if KeyBindEvent then pcall(function() KeyBindEvent:FireServer("F", true) end) end
+end
+
+-- [[ SỬA LẠI SÁT THƯƠNG NGẦM KILL AURA (DÙNG ĐÚNG REMOTE GỐC CỦA GAME) ]]
+local function runSilentAura(targetMob)
+    if not targetMob or not DamageEvent then return end
+    local tool = getTableKick() or (SelectedWeapon and getToolByName(SelectedWeapon))
+    pcall(function()
+        -- Gửi trực tiếp thông số chém trúng quái, game nhận diện vũ khí bạn đang cầm gây ra sát thương
         DamageEvent:FireServer("Click", tool, targetMob.HumanoidRootPart.CFrame)
-        DamageEvent:FireServer("Melee", targetMob)
         DamageEvent:FireServer("Hit", tool, targetMob)
+        DamageEvent:FireServer("Melee", targetMob)
     end)
 end
 
--- [[ FIX 1: SILENT KILL AURA - QUÁI LẠI GẦN TỰ MẤT MÁU NGẦM ]]
+-- VÒNG LẶP HỒI SINH CỦA KILL AURA TREO NGẦM
 task.spawn(function()
     while true do
         if CustomAuraEnabled then
@@ -153,50 +285,133 @@ task.spawn(function()
                     for _, npc in pairs(aliveFolder:GetChildren()) do
                         if npc:IsA("Model") and npc ~= char and npc:FindFirstChild("HumanoidRootPart") and npc:FindFirstChild("Humanoid") and npc.Humanoid.Health > 0 then
                             local distance = (myRoot.Position - npc.HumanoidRootPart.Position).Magnitude
-                            -- Phạm vi quái đi vào vùng 25-30 Studs xung quanh bạn sẽ tự động nhận sát thương ngầm
-                            if distance <= 30 then
-                                silentAttack(npc)
+                            if distance <= 35 then
+                                runSilentAura(npc)
                             end
                         end
                     end
                 end
             end)
         end
-        task.wait(0.1) -- Tốc độ gây sát thương aura
+        task.wait(0.1)
     end
 end)
 
--- SMART AIMBOT (LOCK CAM)
-RunService.RenderStepped:Connect(function()
-    if CustomAimbotEnabled then
-        pcall(function()
+task.spawn(function()
+    local skillIndex = 1
+    while true do
+        task.wait(0.15)
+        if not AutoSkillEnabled then skillIndex = 1; continue end
+        local skillKeys = {}
+        for skill, selected in pairs(SelectedSkills) do
+            if selected then table.insert(skillKeys, skill) end
+        end
+        if #skillKeys == 0 then continue end
+        if skillIndex > #skillKeys then skillIndex = 1 end
+        
+        local keyCode = Enum.KeyCode[skillKeys[skillIndex]]
+        if keyCode then
+            pcall(function()
+                VirtualInput:SendKeyEvent(true, keyCode, false, game)
+                task.wait(0.05)
+                VirtualInput:SendKeyEvent(false, keyCode, false, game)
+            end)
+        end
+        skillIndex = skillIndex + 1
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if AutoHakiEnabled then
             local char = getCharacter()
-            local myRoot = char and char:FindFirstChild("HumanoidRootPart")
-            local aliveFolder = workspace:FindFirstChild("Alive")
-            if myRoot and aliveFolder then
-                local closestPart = nil
-                local shortestDistance = AimbotMaxDistance
-                
-                for _, npc in pairs(aliveFolder:GetChildren()) do
-                    if npc:IsA("Model") and npc ~= char and npc:FindFirstChild("HumanoidRootPart") and npc:FindFirstChild("Humanoid") and npc.Humanoid.Health > 0 then
-                        local distance = (myRoot.Position - npc.HumanoidRootPart.Position).Magnitude
-                        if distance < shortestDistance then
-                            shortestDistance = distance
-                            closestPart = npc.HumanoidRootPart
+            if char and not char:GetAttribute("Observation") then
+                pcall(function()
+                    VirtualInput:SendKeyEvent(true, Enum.KeyCode.R, false, game)
+                    task.wait(0.1)
+                    VirtualInput:SendKeyEvent(false, Enum.KeyCode.R, false, game)
+                end)
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.7)
+        if AutoBringNormalFruit then
+            local char = getCharacter()
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, v in pairs(workspace:GetDescendants()) do
+                    if v and v.Name and not Players:GetPlayerFromCharacter(v.Parent) then
+                        local lowerName = string.lower(v.Name)
+                        if NormalFruitNames[lowerName] and lowerName ~= "coconut" then
+                            local part = v:IsA("BasePart") and v or v:FindFirstChildWhichIsA("BasePart")
+                            if part then pcall(function() part.CFrame = hrp.CFrame * CFrame.new(0, -2.5, 0) end) end
                         end
                     end
                 end
-                
-                if closestPart then
-                    local cam = workspace.CurrentCamera
-                    cam.CFrame = CFrame.new(cam.CFrame.Position, closestPart.Position)
-                end
             end
-        end)
+        end
     end
 end)
 
--- HÀM TÌM QUÁI FARM
+task.spawn(function()
+    while true do
+        task.wait(0.7)
+        if AutoBringDemonFruit then
+            local char = getCharacter()
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, obj in pairs(Workspace:GetChildren()) do
+                    if obj:IsA("Tool") and table.find(FruitNames, obj.Name) and not Players:GetPlayerFromCharacter(obj.Parent) then
+                        local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
+                        if part then pcall(function() part.CFrame = hrp.CFrame * CFrame.new(0, -2.5, 0) end) end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.7)
+        if AutoBringOldBook then
+            local char = getCharacter()
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, obj in pairs(Workspace:GetDescendants()) do
+                    if obj and (string.lower(obj.Name) == "oldbook" or string.lower(obj.Name) == "old book") then
+                        local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
+                        if part then pcall(function() part.CFrame = hrp.CFrame * CFrame.new(0, -2.5, 0) end) end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(0.7)
+        if AutoBringCompass then
+            local char = getCharacter()
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                for _, obj in pairs(Workspace:GetDescendants()) do
+                    if obj and string.find(string.lower(obj.Name), "compass") then
+                        local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
+                        if part then pcall(function() part.CFrame = hrp.CFrame * CFrame.new(0, -2.5, 0) end) end
+                    end
+                end
+            end
+        end
+    end
+end)
+
 local function findMob()
     local aliveFolder = workspace:FindFirstChild("Alive")
     if not aliveFolder then return nil, nil, nil end
@@ -225,94 +440,34 @@ local function findMob()
     return bestMob, bestHum, bestRoot
 end
 
--- [[ FIX 2: AUTO FARM BAY TRÊN ĐẦU QUÁI (OVERHEAD) CHỐNG BỊ ĐÁNH TRÚNG ]]
+-- [[ SỬA LẠI KHOẢNG CÁCH FARM: BAY THẤP TẦM 4.2 STUDS ĐỂ BẠN ĐÁNH TỚI, QUÁI ĐÁNH TRƯỢT ]]
 task.spawn(function()
-    while task.wait(0.02) do
+    while task.wait(0.01) do
         if not FarmEnabled then
             if CurrentTarget then pcall(function() CurrentTarget.Humanoid.WalkSpeed = 16 end); CurrentTarget = nil end
             continue
         end
-        
         local mob, hum, root = findMob()
         if mob and hum and root then
             CurrentTarget = mob
             local char = getCharacter()
             local myRoot = char and char:FindFirstChild("HumanoidRootPart")
-            
             if myRoot and root then
-                -- Đóng băng quái tại chỗ không cho di chuyển bậy
                 pcall(function() 
                     root.AssemblyLinearVelocity = Vector3.zero 
                     hum.WalkSpeed = 0
                 end)
                 
-                -- Nhân vật sẽ liên tục được giữ ở vị trí CỐ ĐỊNH trên đỉnh đầu quái 12 block (Overhead)
-                myRoot.CFrame = root.CFrame * CFrame.new(0, OverheadOffset.Y, 0) * CFrame.Angles(math.rad(-90), 0, 0)
-                
-                -- Thực hiện đấm ngầm liên tục
-                silentAttack(mob)
+                -- Đứng lơ lửng ngay trên đầu quái đúng 4.2 block (Tầm cực chuẩn giúp Melee của bạn chém trúng quái, quái chịu chết)
+                myRoot.CFrame = root.CFrame * CFrame.new(0, 4.2, 0) * CFrame.Angles(math.rad(-90), 0, 0)
             end
+            attack()
             if hum.Health <= 0 then CurrentTarget = nil end
         end
     end
 end)
 
--- [[ FIX 3: TÍNH NĂNG BAY CHO PLAYER (FLY FUNCTION) ]]
-local function HandlePlayerFly()
-    if FlyConnection then FlyConnection:Disconnect(); FlyConnection = nil end
-    local char = getCharacter()
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not hrp or not hum then return end
-    
-    if FlyEnabled then
-        local bodyVelocity = Instance.new("BodyVelocity")
-        bodyVelocity.Name = "SonHub_FlyVelocity"
-        bodyVelocity.Velocity = Vector3.new(0, 0, 0)
-        bodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-        bodyVelocity.Parent = hrp
-        
-        local bodyGyro = Instance.new("BodyGyro")
-        bodyGyro.Name = "SonHub_FlyGyro"
-        bodyGyro.P = 9e4
-        bodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-        bodyGyro.CFrame = hrp.CFrame
-        bodyGyro.Parent = hrp
-        
-        FlyConnection = RunService.RenderStepped:Connect(function()
-            if not FlyEnabled or not hrp.Parent then 
-                bodyVelocity:Destroy()
-                bodyGyro:Destroy()
-                FlyConnection:Disconnect()
-                return 
-            end
-            
-            local camCFrame = workspace.CurrentCamera.CFrame
-            local moveDirection = Vector3.new(0,0,0)
-            
-            -- Đọc hướng di chuyển ảo trên Mobile / Keyboard
-            if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDirection = moveDirection + camCFrame.LookVector end
-            if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDirection = moveDirection - camCFrame.LookVector end
-            if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDirection = moveDirection - camCFrame.RightVector end
-            if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDirection = moveDirection + camCFrame.RightVector end
-            
-            -- Hỗ trợ Touch Joystick trên mobile
-            if hum.MoveDirection.Magnitude > 0 then
-                moveDirection = hum.MoveDirection
-            end
-            
-            bodyVelocity.Velocity = moveDirection * FlySpeed
-            bodyGyro.CFrame = camCFrame
-        end)
-    else
-        local oldV = hrp:FindFirstChild("SonHub_FlyVelocity")
-        local oldG = hrp:FindFirstChild("SonHub_FlyGyro")
-        if oldV then oldV:Destroy() end
-        if oldG then oldG:Destroy() end
-    end
-end
-
--- VÒNG LẶP AUTO RƯƠNG
+-- VÒNG LẶP AUTO RƯƠNG GỐC
 task.spawn(function()
     while task.wait(0.2) do
         if ChestEnabled then
@@ -340,9 +495,9 @@ local function getAvailableWeapons()
     return weapons
 end
 
--- [[ KHỞI TẠO INTERFACE WINDUI GỐC ]]
+-- [[ KHỞI TẠO LẠI TOÀN BỘ GIAO DIỆN GỐC - CHỈ THÊM NÚT KILL AURA ]]
 local Window = WindUI:CreateWindow({
-    Title = "SON HUB V4 REMAKE",
+    Title = "SON HUB V4",
     Author = "by SonDepTrai",
     Icon = "solar:star-bold",
     Folder = "SON_HUB",
@@ -359,12 +514,13 @@ local Window = WindUI:CreateWindow({
     },
 })
 
-Window:Tag({ Title = "v4 Remake V2", Color = Color3.fromHex("#FF6B35") })
+Window:Tag({ Title = "V4 Fixed", Color = Color3.fromHex("#FF6B35") })
 
 local FarmTab = Window:Tab({ Title = "Farm System", Icon = "solar:leaf-bold" })
-local TeleportTab = Window:Tab({ Title = "Movement & Player", Icon = "solar:planet-bold" })
+local ConfigFarmTab = Window:Tab({ Title = "Config", Icon = "solar:cpu-bold" })
+local TeleportTab = Window:Tab({ Title = "Teleport", Icon = "solar:planet-bold" })
 
-local FarmSection = FarmTab:Section({ Title = "Overhead Autofarm", Opened = true })
+local FarmSection = FarmTab:Section({ Title = "Main Autofarm", Opened = true })
 
 local weaponDropdown
 FarmSection:Button({
@@ -386,7 +542,7 @@ weaponDropdown = FarmSection:Dropdown({
 })
 
 FarmSection:Toggle({
-    Title = "Auto Farm Mobs (Overhead)",
+    Title = "Auto Farm Mobs",
     Value = false,
     Callback = function(v) FarmEnabled = v end
 })
@@ -398,37 +554,59 @@ FarmSection:Dropdown({
     Callback = function(v) FarmMode = v end
 })
 
+-- NÚT THÊM DUY NHẤT TRONG PHẦN FARM
 FarmSection:Divider()
 FarmSection:Toggle({
-    Title = "🔥 Silent Kill Aura (Quái Tự Mất Máu)",
+    Title = "🔥 Silent Kill Aura (Gây Sát Thương Ngầm)",
     Value = false,
     Callback = function(v) CustomAuraEnabled = v end
 })
 
 FarmSection:Toggle({
-    Title = "🎯 Smart Aimbot (Lock Cam)",
+    Title = "Auto Collect Chests",
     Value = false,
-    Callback = function(v) CustomAimbotEnabled = v end
+    Callback = function(v) ChestEnabled = v end
 })
 
--- Tab Dịch chuyển & Tính năng cho Người chơi
-local MovementSection = TeleportTab:Section({ Title = "Player Flight Mode", Opened = true })
+local SkillSection = ConfigFarmTab:Section({ Title = "Auto Attack Skills", Opened = true })
+SkillSection:Toggle({ Title = "Toggle Auto Skills", Value = false, Callback = function(v) AutoSkillEnabled = v end })
 
-MovementSection:Toggle({
-    Title = "✈️ Kích Hoạt Tính Năng Fly Player",
-    Value = false,
-    Callback = function(v) 
-        FlyEnabled = v 
-        HandlePlayerFly()
+for _, skill in ipairs(AvailableSkills) do
+    SkillSection:Toggle({
+        Title = "Skill Bind [" .. skill .. "]",
+        Value = false,
+        Callback = function(v) SelectedSkills[skill] = v end
+    })
+end
+
+local IslandSection = TeleportTab:Section({ Title = "World Teleport", Opened = true })
+local IslandNames = {} for n in pairs(Islands) do table.insert(IslandNames, n) end
+
+IslandSection:Dropdown({
+    Title = "Choose Target Island",
+    Values = IslandNames,
+    Value = "None",
+    Callback = function(v)
+        if v ~= "None" and Islands[v] then tweenToPosition(Islands[v], nil, true) end
     end
 })
 
-MovementSection:Slider({
-    Title = "Tốc Độ Bay (Fly Speed)",
-    Min = 50,
-    Max = 300,
-    Value = 100,
-    Callback = function(v) FlySpeed = v end
-})
+local toggleGui = Instance.new("ScreenGui")
+toggleGui.Name = "SON_Toggle_Fixed"
+toggleGui.Parent = Player:WaitForChild("PlayerGui")
+toggleGui.ResetOnSpawn = false
 
-WindUI:Notify({ Title = "OP Remake V2", Content = "Đã fix hoàn tất Kill Aura và Farm Trên Đầu Quái!", Duration = 4 })
+local toggleBtn = Instance.new("ImageButton")
+toggleBtn.Size = UDim2.new(0, isMobile and 50 or 65, 0, isMobile and 50 or 65)
+toggleBtn.Position = UDim2.new(0, 15, 0, isMobile and 60 or 90)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+toggleBtn.BackgroundTransparency = 0.3
+toggleBtn.Image = "rbxassetid://86946036155828"
+toggleBtn.Parent = toggleGui
+
+toggleBtn.MouseButton1Click:Connect(function()
+    menuVisible = not menuVisible
+    if menuVisible then Window:Open() else Window:Close() end
+end)
+
+WindUI:Notify({ Title = "OP Fixed", Content = "Đã chỉnh khoảng cách Farm thấp & Sửa Silent Aura!", Duration = 4 })
